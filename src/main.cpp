@@ -29,10 +29,10 @@ SOFTWARE.
 #include <RF24_config.h>
 #include <RF24.h>
 
-//Motors enable joystick button
+//Motors joystick button enable
 const unsigned int pinSwEnable = 2;
 
-//Motors Enable Led pin
+//Led pin enable motors
 const unsigned int ledEnable = 7;
 
 //Radio Chip Select & Chip Enable
@@ -128,7 +128,6 @@ void setup() {
 
   //LED enable status
   digitalWrite(ledEnable, pkt.enable);
-
 }
 
 //Reads the joystick values, maps them and updates the variables in the Packet
