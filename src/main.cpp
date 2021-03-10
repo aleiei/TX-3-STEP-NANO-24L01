@@ -62,13 +62,13 @@ const unsigned long debounceDelay = 10;
 
 //Package structure to be sent
 struct Packet {
-  boolean moveX;
+  bool moveX;
   long speedX;
-  boolean moveY;
+  bool moveY;
   long speedY;
-  boolean moveZ;
+  bool moveZ;
   long speedZ;
-  boolean enable;
+  bool enable;
 };
 
 //Variables
@@ -86,15 +86,15 @@ Packet pkt = {
   false,
   //long speedX;
   0,
-  //boolean moveY;
+  //bool moveY;
   false,
   //long speedY;
   0,
-  //boolean moveZ;
+  //bool moveZ;
   false,
   //long speedZ;
   0,
-  //boolean enable button;
+  //bool enable button;
   false,
 };
 
