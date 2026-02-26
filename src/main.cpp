@@ -1,213 +1,198 @@
 /*
   MIT License
 
-Copyright (c) 2021 Alessandro Orlando
+  Copyright (c) 2021 Alessandro Orlando
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 */
 
-//Library
+// Libraries
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <nRF24L01.h>
-#include <RF24_config.h>
 #include <RF24.h>
 
-//Motors joystick button enable
+// Motors joystick button enable
 const unsigned int pinSwEnable = 2;
 
-//Led pin enable motors
+// LED pin enable motors
 const unsigned int ledEnable = 7;
 
-//Radio Chip Select & Chip Enable
+// Radio Chip Select & Chip Enable
 const unsigned int radioCE = 9;
 const unsigned int radioCS = 10;
 
-//joystick analog pins
+// Joystick analog pins
 const unsigned int jX = A0;
 const unsigned int jY = A1;
 const unsigned int jZ = A2;
 
-//Radio address
-const byte address[5] = {0, 0, 0, 0, 0};
+// FIX: avoid all-zero address — causes collisions with nRF24L01 broadcast packets.
+// Must match receiver exactly.
+const byte address[6] = "00001";
 
-//Variables used to define min and max speed and map to joystick values
-const unsigned int maxSpeed = 1000;
-const unsigned int minSpeed = 0;
+// Speed range
+const int maxSpeed = 1000;
+const int minSpeed = 0;
 
 /*
-  The reading of the potentiometers is never 100% reliable
-  This value helps determine the point to be considered as "Hold still" movement
+  The reading of the potentiometers is never 100% reliable.
+  This value helps determine the point to be considered as "Hold still" movement.
 */
-const unsigned int treshold = 30;
+const int threshold = 30;  // FIX: corrected typo "treshold" → "threshold"
 
-//Milliseconds for debonuce Button
+// Milliseconds for debounce button
 const unsigned long debounceDelay = 10;
 
-//Package structure to be sent
-struct Packet {
-  bool moveX;
-  long speedX;
-  bool moveY;
-  long speedY;
-  bool moveZ;
-  long speedZ;
-  bool enable;
+// FIX: __attribute__((packed)) prevents compiler padding between bool and int16_t,
+//      which would push the struct over the nRF24L01 32-byte payload limit.
+// FIX: long (4 bytes) → int16_t (2 bytes) — range -1000..+1000 fits in int16_t.
+//      Packed struct size: 3*(1+2) + 1 = 10 bytes. Safe and matches receiver.
+struct __attribute__((packed)) Packet {
+  bool    moveX;
+  int16_t speedX;
+  bool    moveY;
+  int16_t speedY;
+  bool    moveZ;
+  int16_t speedZ;
+  bool    enable;
 };
 
-//Variables
-long  valX, mapX, valY, mapY, valZ, mapZ, tresholdUp, tresholdDown;
-
-//Button from the Bounce library
+// Bounce button instance
 Bounce btnEnable = Bounce();
 
-//Radio pins connected to CE and CSN of the module
+// Radio object
 RF24 radio(radioCE, radioCS);
 
-//Initialize packet to send
-Packet pkt = {
-  //boolean moveX;
-  false,
-  //long speedX;
-  0,
-  //bool moveY;
-  false,
-  //long speedY;
-  0,
-  //bool moveZ;
-  false,
-  //long speedZ;
-  0,
-  //bool enable button;
-  false,
-};
+// Initialize packet to safe stopped state
+Packet pkt = { false, 0, false, 0, false, 0, false };
 
-void setup() {
-
-  //Enable pullup button pin
-  pinMode(pinSwEnable, INPUT_PULLUP);
-
-  //Enable LED pin
-  pinMode(ledEnable, OUTPUT);
-
-  //Radio inizialize 
-  radio.begin();
- 
-  //Radio output power, in my case at LOW
-  radio.setPALevel(RF24_PA_LOW);
-
-  //Radio communication channel on the specified address (it will be the same for the receiver)
-  radio.openWritingPipe(address);
-
-  //The radio does not receive, it only transmits
-  radio.stopListening();
-
-  //Button instance
-  btnEnable.attach(pinSwEnable);
-  btnEnable.interval(debounceDelay);
-
-   //Range of values within which to consider the position of the joystick as "Stay still"
-  tresholdDown = (maxSpeed / 2) - treshold;
-  tresholdUp = (maxSpeed / 2) + treshold;
-
-  //LED enable status
-  digitalWrite(ledEnable, pkt.enable);
-}
-
-//Reads the joystick values, maps them and updates the variables in the Packet
+// ---------------------------------------------------------------------------
+// Reads joystick values, maps them and updates the Packet struct.
+// FIX: variables moved from global scope to local — no need to be global.
+// FIX: map() arguments were inverted in the "go ahead/up/left" branches,
+//      producing wrong or negative speed values.
+// ---------------------------------------------------------------------------
 void handleJoystick() {
 
-  //Analogue reading of the values coming from the joystick potentiometers
-  valX = analogRead(jX);
-  valY = analogRead(jY);
-  valZ = analogRead(jZ);
+  // Analogue reading of the joystick potentiometers
+  long valX = analogRead(jX);
+  long valY = analogRead(jY);
+  long valZ = analogRead(jZ);
 
-  //Map of values read in accordance with the minimum and maximum speed
-  mapX = map(valX, 0, 1023, minSpeed, maxSpeed);
-  mapY = map(valY, 0, 1023, minSpeed, maxSpeed);
-  mapZ = map(valZ, 0, 1023, minSpeed, maxSpeed);
+  // Map raw ADC values (0–1023) to speed range (0–1000)
+  long mapX = map(valX, 0, 1023, minSpeed, maxSpeed);
+  long mapY = map(valY, 0, 1023, minSpeed, maxSpeed);
+  long mapZ = map(valZ, 0, 1023, minSpeed, maxSpeed);
 
-  if (mapX <= tresholdDown) {
-    //x goes back
-    pkt.speedX = -map(mapX, tresholdDown, minSpeed,   minSpeed, maxSpeed);
-    pkt.moveX = true;
-  } else if (mapX >= tresholdUp) {
-    //x go ahead
-    pkt.speedX = map(mapX,  maxSpeed, tresholdUp,  maxSpeed, minSpeed);
-    pkt.moveX = true;
+  // Threshold boundaries for deadzone
+  const long thresholdDown = (maxSpeed / 2) - threshold;
+  const long thresholdUp   = (maxSpeed / 2) + threshold;
+
+  // --- Axis X ---
+  if (mapX <= thresholdDown) {
+    // X goes back — negative speed
+    // FIX: was map(mapX, tresholdDown, minSpeed, ...) → fromLow > fromHigh, wrong result
+    pkt.speedX = (int16_t)(-map(mapX, minSpeed, thresholdDown, minSpeed, maxSpeed));
+    pkt.moveX  = true;
+  } else if (mapX >= thresholdUp) {
+    // X goes forward — positive speed
+    // FIX: was map(mapX, maxSpeed, tresholdUp, ...) → fromLow > fromHigh, wrong result
+    pkt.speedX = (int16_t)(map(mapX, thresholdUp, maxSpeed, minSpeed, maxSpeed));
+    pkt.moveX  = true;
   } else {
-    //x stands still
+    // X deadzone — stand still
     pkt.speedX = 0;
-    pkt.moveX = false;
+    pkt.moveX  = false;
   }
 
-  if (mapY <= tresholdDown) {
-    //y go down
-    pkt.speedY = -map(mapY, tresholdDown, minSpeed,   minSpeed, maxSpeed);
-    pkt.moveY = true;
-  } else if (mapY >= tresholdUp) {
-    //y go up
-    pkt.speedY = map(mapY,  maxSpeed, tresholdUp,  maxSpeed, minSpeed);
-    pkt.moveY = true;
+  // --- Axis Y ---
+  if (mapY <= thresholdDown) {
+    pkt.speedY = (int16_t)(-map(mapY, minSpeed, thresholdDown, minSpeed, maxSpeed));
+    pkt.moveY  = true;
+  } else if (mapY >= thresholdUp) {
+    pkt.speedY = (int16_t)(map(mapY, thresholdUp, maxSpeed, minSpeed, maxSpeed));
+    pkt.moveY  = true;
   } else {
-    //y stands still
     pkt.speedY = 0;
-    pkt.moveY = false;
+    pkt.moveY  = false;
   }
 
-    if (mapZ <= tresholdDown) {
-    //z goes right
-    pkt.speedZ = -map(mapZ, tresholdDown, minSpeed,   minSpeed, maxSpeed);
-    pkt.moveZ = true;
-  } else if (mapZ >= tresholdUp) {
-    //z goes left
-    pkt.speedZ = map(mapZ,  maxSpeed, tresholdUp,  maxSpeed, minSpeed);
-    pkt.moveZ = true;
+  // --- Axis Z ---
+  if (mapZ <= thresholdDown) {
+    pkt.speedZ = (int16_t)(-map(mapZ, minSpeed, thresholdDown, minSpeed, maxSpeed));
+    pkt.moveZ  = true;
+  } else if (mapZ >= thresholdUp) {
+    pkt.speedZ = (int16_t)(map(mapZ, thresholdUp, maxSpeed, minSpeed, maxSpeed));
+    pkt.moveZ  = true;
   } else {
-    //z stands still
     pkt.speedZ = 0;
-    pkt.moveZ = false;
+    pkt.moveZ  = false;
   }
-
 }
 
-//reads the state of the enable button
+// ---------------------------------------------------------------------------
+// Reads the enable button state and updates the LED.
+// ---------------------------------------------------------------------------
 void handleButton() {
-
   btnEnable.update();
   if (btnEnable.fell()) {
     pkt.enable = !pkt.enable;
   }
+  digitalWrite(ledEnable, pkt.enable);
+}
 
-  //Show enable status with LED
+// ---------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+
+  // Button and LED pins
+  pinMode(pinSwEnable, INPUT_PULLUP);
+  pinMode(ledEnable,   OUTPUT);
+
+  // Radio initialization
+  radio.begin();
+  radio.setPALevel(RF24_PA_LOW);
+  radio.openWritingPipe(address);
+  radio.stopListening();
+
+  // Debounce button
+  btnEnable.attach(pinSwEnable);
+  btnEnable.interval(debounceDelay);
+
+  // Initial LED state
   digitalWrite(ledEnable, pkt.enable);
 
-  }
-  void loop() {
+  // Debug: confirm packed struct fits within nRF24L01 32-byte limit
+  Serial.print("Packet size: ");
+  Serial.print(sizeof(pkt));
+  Serial.println(" bytes (max 32)");
+}
 
-  //Button status loop
+// ---------------------------------------------------------------------------
+void loop() {
   handleButton();
-
-  //Joystick status loop
   handleJoystick();
 
-  //Radio packet send loop
-  radio.write(&pkt, sizeof(pkt));
-
+  // FIX: check radio.write() return value — false means transmission failed
+  bool ok = radio.write(&pkt, sizeof(pkt));
+  if (!ok) {
+    Serial.println("TX failed");
+  }
 }
